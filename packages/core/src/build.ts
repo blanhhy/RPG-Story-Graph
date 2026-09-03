@@ -12,7 +12,7 @@ const CALL_EVENT = 12330;      // 参数[0]==0 → 公共事件；其他 → 事
 const TELEPORT = 10810;
 const RECALL = 10830;          // 运行时行为，不作切分、不产生静态边
 const CONTROL_SWITCHES = 10210; // 开关操作：设置开关 ON/OFF（用于识别"事件页切换"激活）
-const MESSAGE = new Set([10110, 20110, 10140, 20140, 10610]); // 显示有效承载
+const MESSAGE = new Set([10110, 20110, 10140, 20140]); // 显示有效承载
 
 // 块 = 连续执行的"非流程"命令（其中可含对话）。流程命令做切分点。
 const FLOW = new Set([
@@ -198,7 +198,6 @@ function extractDialogue(cmds: EventCommand[], range: [number, number] | null): 
     if (c.code === 10140) parts.push('【选择】');
     else if (c.code === 20140) parts.push(`·${c.string ?? ''}`);
     else if (c.code === 10110 || c.code === 20110) parts.push(c.string ?? '');
-    else if (c.code === 10610) parts.push(`(名字:${c.string ?? ''})`);
   }
   return parts.filter(Boolean).join(' / ');
 }
