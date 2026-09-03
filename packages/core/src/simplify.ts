@@ -94,6 +94,16 @@ export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
     return ins.length * outs.length <= 400;
   };
 
+  // 分支枢纽：出边含 ≥2 条分支的空节点，若按 ins×outs 做笛卡尔积短路，会把一条
+  // 线性条件链炸成 O(n²) 的完全扇出（一个文本节点连到后面所有文本节点）。保留为
+  // 占位枢纽，维持"条件检查点"的语义与线性结构。两种情况需要保留：
+  //  1) 多入多出（如"连续 IF"里，上一个 IF 的汇合点又兼作下一个 IF 的条件父节点）；
+  //  2) 有 call 入边（子图入口即分支，如公共事件一进来就 IF——否则调用会被拆成
+  //     对每个分支的重复 call，破坏"单一入口"语义）。
+  const isBranchHub = (outs: MinEdge[], ins: MinEdge[]): boolean =>
+    outs.filter(e => e.kind === 'branch').length >= 2 &&
+    (ins.length >= 2 || ins.some(e => e.kind === 'call'));
+
   // 不动点精简：反复扫描并短路所有"安全"的空节点（无文本 + 扇出受限），
   // 直到无节点可删。每轮基于当前 in/out 度重新判定，避免一次性队列里
   // 因邻居合并导致度变化让某些节点被永久跳过（残留空节点）——被本轮
@@ -108,8 +118,9 @@ export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
     for (const [id, n] of nodes) {
       if (!isRemovable(n)) continue;
       const outs = liveOut(id);
-      if (!outFanOutOk(id, n.role, outs)) continue;
       const ins = liveIn(id);
+      if (isBranchHub(outs, ins)) continue; // 保留分支枢纽，避免条件链扇出
+      if (!outFanOutOk(id, n.role, outs)) continue;
       candidates.push({ id, score: ins.length * outs.length });
     }
     candidates.sort((a, b) => a.score - b.score);
@@ -124,28 +135,42 @@ export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
       if (outs.length > 1 && ins.length === 0) {
         removed.add(id);
         nodes.delete(id);
-        for (const e of outs) dead.add(e);
+        for (const e of outIdx.get(id) ?? []) dead.add(e);
         progress = true;
         continue;
       }
       // 复检：度可能在本轮前面节点的短路中变化，此刻仍超限则延后到下一轮。
+      if (isBranchHub(outs, ins)) continue; // 邻接变化后成为分支枢纽，延后
       if (!outFanOutOk(id, n.role, outs)) continue;
 
       removed.add(id);
       nodes.delete(id);
-      for (const e of ins) dead.add(e);
-      for (const e of outs) dead.add(e);
+      // dead 所有出入边（含折叠过程中新产生的平行边），而非仅去重后的 ins/outs：
+      // 若只 dead 去重代表边，平行边会成为指向已删除节点的孤儿边，仍在 in/out 索引里，
+      // 把邻接度虚高、令节点被 isBranchHub 误判保留，最终留下"空→空"线性链。
+      for (const e of outIdx.get(id) ?? []) dead.add(e);
+      for (const e of inIdx.get(id) ?? []) dead.add(e);
 
       // 短路：每个入边 × 每个出边
       for (const ie of ins) {
         for (const oe of outs) {
           if (oe.to === ie.from) continue; // 自环
-          const useOut = !TRANSPARENT.has(oe.kind);
+          // call / return 是"跨子图"边界，不能被中间空节点的分支类别覆盖：
+          // call 入边应保持 call（否则调用被误写成条件分支），return 出边应保持 return。
+          let kind: EdgeKind;
+          let note: string | undefined;
+          if (ie.kind === 'call') { kind = 'call'; note = oe.note ?? ie.note; }
+          else if (oe.kind === 'return') { kind = 'return'; note = ie.note ?? oe.note; }
+          else {
+            const useOut = !TRANSPARENT.has(oe.kind);
+            kind = useOut ? oe.kind : ie.kind;
+            note = useOut ? (oe.note ?? ie.note) : (ie.note ?? oe.note);
+          }
           const ne: MinEdge = {
             from: ie.from,
             to: oe.to,
-            kind: useOut ? oe.kind : ie.kind,
-            note: useOut ? (oe.note ?? ie.note) : (ie.note ?? oe.note),
+            kind,
+            note,
             ret: ie.ret ?? oe.ret,
           };
           edges.push(ne);
