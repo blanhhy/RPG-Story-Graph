@@ -109,6 +109,108 @@ export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
   // 因邻居合并导致度变化让某些节点被永久跳过（残留空节点）——被本轮
   // 跳过的节点会在下一轮重新判定，最终收敛到「能删的全删、超限的当枢纽保留」。
   const removed = new Set<string>();
+
+  // ===== 整体短路：纯空连通分量 =====
+  // 用户观察到的"龙须糖"式空子图：内部空节点互相连接极其复杂，但整体只通过
+  // 少数几条边界边与外部（文本节点或简单空节点）相连。逐节点折叠会因内部多入多出
+  // （isBranchHub）或 ins×outs 超限而卡住——但这类结构整体上等价于一条线（或一个小
+  // 枢纽），根本不需要理解内部，直接把「入边界 × 出边界」直连即可。
+  // 这里把每个"纯空连通分量"（仅由空节点及空→空边构成）当作一个超级节点整体坍缩。
+  const collapseEmptyComponents = (): boolean => {
+    const emptyIds = new Set<string>();
+    for (const [id, n] of nodes) if (!n.hasText) emptyIds.add(id);
+    // 空→空邻接（只走空节点之间的边）
+    const adj = new Map<string, string[]>();
+    for (const id of emptyIds) adj.set(id, []);
+    for (const e of edges) {
+      if (dead.has(e)) continue;
+      if (emptyIds.has(e.from) && emptyIds.has(e.to)) {
+        adj.get(e.from)!.push(e.to);
+        adj.get(e.to)!.push(e.from);
+      }
+    }
+    const visited = new Set<string>();
+    let changed = false;
+    for (const id of emptyIds) {
+      if (visited.has(id)) continue;
+      // 收集一个纯空连通分量
+      const comp = new Set<string>();
+      const q = [id];
+      visited.add(id);
+      while (q.length) {
+        const cur = q.pop()!;
+        comp.add(cur);
+        for (const nb of adj.get(cur) ?? []) {
+          if (!visited.has(nb)) { visited.add(nb); q.push(nb); }
+        }
+      }
+      // 边界：入边界 = 外部 → 分量内（按来源去重）；出边界 = 分量内 → 外部（按目标去重）
+      const inB: MinEdge[] = [];
+      const outB: MinEdge[] = [];
+      const seenIn = new Set<string>();
+      const seenOut = new Set<string>();
+      for (const cid of comp) {
+        for (const e of inIdx.get(cid) ?? []) {
+          if (dead.has(e)) continue;
+          if (comp.has(e.from)) continue;
+          if (seenIn.has(e.from)) continue;
+          seenIn.add(e.from);
+          inB.push(e);
+        }
+        for (const e of outIdx.get(cid) ?? []) {
+          if (dead.has(e)) continue;
+          if (comp.has(e.to)) continue;
+          if (seenOut.has(e.to)) continue;
+          seenOut.add(e.to);
+          outB.push(e);
+        }
+      }
+      // call 入口保留：展开 call 会把"一次调用"拆成对每个分支的重复调用，
+      // 破坏子图单一入口语义；这类留给逐节点折叠的 isBranchHub 兜底。
+      if (inB.some(e => e.kind === 'call')) continue;
+      // 入口/出口/孤立分量：直接删除，出边（或入边）随之悬空，图自然裂开。
+      if (inB.length === 0 || outB.length === 0) {
+        for (const cid of comp) {
+          removed.add(cid);
+          nodes.delete(cid);
+          for (const e of outIdx.get(cid) ?? []) dead.add(e);
+          for (const e of inIdx.get(cid) ?? []) dead.add(e);
+        }
+        changed = true;
+        continue;
+      }
+      // 边界入×出可控才整体坍缩；真正的大扇出（几十入×几十出）保留为枢纽。
+      if (inB.length * outB.length > 400) continue;
+      for (const cid of comp) {
+        removed.add(cid);
+        nodes.delete(cid);
+        for (const e of outIdx.get(cid) ?? []) dead.add(e);
+        for (const e of inIdx.get(cid) ?? []) dead.add(e);
+      }
+      for (const ie of inB) {
+        for (const oe of outB) {
+          if (oe.to === ie.from) continue; // 自环
+          let kind: EdgeKind;
+          let note: string | undefined;
+          if (ie.kind === 'call') { kind = 'call'; note = oe.note ?? ie.note; }
+          else if (oe.kind === 'return') { kind = 'return'; note = ie.note ?? oe.note; }
+          else {
+            const useOut = !TRANSPARENT.has(oe.kind);
+            kind = useOut ? oe.kind : ie.kind;
+            note = useOut ? (oe.note ?? ie.note) : (ie.note ?? oe.note);
+          }
+          const ne: MinEdge = { from: ie.from, to: oe.to, kind, note, ret: ie.ret ?? oe.ret };
+          edges.push(ne);
+          pushIdx(outIdx, ne.from, ne);
+          pushIdx(inIdx, ne.to, ne);
+        }
+      }
+      changed = true;
+    }
+    return changed;
+  };
+  while (collapseEmptyComponents()) { /* 不动点：整体短路后可能产生新的纯空分量 */ }
+
   let progress = true;
   while (progress) {
     progress = false;

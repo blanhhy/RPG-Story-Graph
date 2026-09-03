@@ -604,6 +604,7 @@ export function buildStoryGraphs(units: ExecUnit[], ctx: BuildCtx): { graphs: St
         unitsBySwitch.set(sid, arr);
       }
     }
+    const unitByKey = new Map(units.map(x => [x.key, x]));
     for (const u of units) {
       const switches = setSwitchesOn(u);
       if (!switches.size) continue;
@@ -614,6 +615,12 @@ export function buildStoryGraphs(units: ExecUnit[], ctx: BuildCtx): { graphs: St
         const targets = unitsBySwitch.get(sid) ?? [];
         for (const tkey of targets) {
           if (tkey === u.key) continue;
+          // 自持开关跳过：目标页既需要 S 又自己设置 S（复制粘贴的传送中继页
+          // 常这样——"进度到 S 才激活，执行完仍把 S 置 ON"）。这类页彼此没有
+          // 剧情先后关系，若保留"设 S → 需 S"会形成每个中继页连到所有中继页的
+          // O(n²) 完全图。跳过自持连接，只保留真正的进度推进。
+          const tUnit = unitByKey.get(tkey);
+          if (tUnit && setSwitchesOn(tUnit).has(sid)) continue;
           // 开关是全局状态，设置开关 S 的单元会激活任何需要 S 的条件页，
           // 不限于同地图（如"前一章说完话设置开关 → 下一章条件页激活"）。
           src.succ.push({ kind: 'next', to: `${tkey}#0`, note: '开关激活' });
