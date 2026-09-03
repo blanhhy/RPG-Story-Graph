@@ -55,11 +55,12 @@ export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
 
   const outFanOutOk = (id: string, role: string, outs: MinEdge[]): boolean => {
     if (outs.length <= 1) return true;  // 单向中继
-    // 无入边的多出边空节点：入口型（如初始房间分叉到各剧情房间）——
-    // 它只是"代码入口"，不是剧情枢纽；消除时出边各自悬空断开，不构成剧情连通。
     {
       const ins = liveIn(id);
-      if (ins.length === 0) return true;
+      // 入边 ≤ 1 的多出边空节点：短路只产生 1×N 条新边，无笛卡尔积膨胀——
+      // 无入边的入口型（初始房间分叉）/ 单入边的中继型（自动页入口即转移，出边是多入口展开）
+      // 都不是剧情枢纽；尤其是后者，不消除会挡住剧情链（如上图的传送中继 M5E3P1）。
+      if (ins.length <= 1) return true;
     }
     if (role !== 'code') return false;  // 非 code 的多出边 = 结构枢纽
     // code 空节点：如果所有出边都是 branch/join/loop（无 next/teleport/goto），可以短路
@@ -97,7 +98,7 @@ export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
       for (const e of outs) dead.add(e);
       continue;
     }
-    if (outs.length > 1) continue; // 高扇出枢纽，保留
+    if (outs.length > 1 && ins.length > 1) continue; // 多入多出枢纽，保留
 
     removed.add(id);
     nodes.delete(id);
