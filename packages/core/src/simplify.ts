@@ -20,10 +20,6 @@ interface MinEdge {
   from: string; to: string; kind: EdgeKind; ret?: string; note?: string;
 }
 
-function mergeEdge(a: MinEdge, b: MinEdge): MinEdge {
-  return { ...a, ret: a.ret ?? b.ret, note: b.note ?? a.note };
-}
-
 export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
   // 无文本图 → 舍弃
   if (!raw.nodes.some(n => n.hasText)) return null;
@@ -67,95 +63,96 @@ export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
       pushIdx(inIdx, e.to, e);
     }
   }
-  const liveOut = (id: string) => (outIdx.get(id) ?? []).filter(e => !dead.has(e));
-  const liveIn = (id: string) => (inIdx.get(id) ?? []).filter(e => !dead.has(e));
+  const liveOut = (id: string) => {
+    const arr = outIdx.get(id) ?? [];
+    // 按目标去重：短路过程中会产生大量同 (from,to) 的平行新边（最终组装才统一去重），
+    // 若用原始边数参与扇出判定，会把真实分支度小的节点误判成高扇出枢纽而漏删。
+    const seen = new Set<string>();
+    const res: MinEdge[] = [];
+    for (const e of arr) { if (dead.has(e)) continue; if (seen.has(e.to)) continue; seen.add(e.to); res.push(e); }
+    return res;
+  };
+  const liveIn = (id: string) => {
+    const arr = inIdx.get(id) ?? [];
+    const seen = new Set<string>();
+    const res: MinEdge[] = [];
+    for (const e of arr) { if (dead.has(e)) continue; if (seen.has(e.from)) continue; seen.add(e.from); res.push(e); }
+    return res;
+  };
 
   const isRemovable = (n: StoryNode): boolean => {
     // 无文本 = 无效子图的组成部分（纯代码流位置），一律可短路
     return !n.hasText;
   };
 
-  // 整单元无文本（纯调度页/工具页）：其内部 join/entry 等结构节点没有任何剧情承载，
-  // 折叠只做"入×出"的透明转发，不受多入多出枢纽限制（如大串 IF 的开关检查调度）。
-  const unitNoText = new Set<string>();
-  {
-    const textUnit = new Set<string>();
-    for (const n of raw.nodes) if (n.hasText) textUnit.add(n.unit);
-    for (const n of raw.nodes) if (!textUnit.has(n.unit)) unitNoText.add(n.unit);
-  }
-  const unitDevoid = (id: string) => unitNoText.has(id.split('#')[0]);
-
   const outFanOutOk = (id: string, role: string, outs: MinEdge[]): boolean => {
     if (outs.length <= 1) return true;  // 单向中继
-    {
-      const ins = liveIn(id);
-      // 入边 ≤ 1 的多出边空节点：短路只产生 1×N 条新边，无笛卡尔积膨胀——
-      // 无入边的入口型（初始房间分叉）/ 单入边的中继型（自动页入口即转移，出边是多入口展开）
-      // 都不是剧情枢纽；尤其是后者，不消除会挡住剧情链（如上图的传送中继 M5E3P1）。
-      if (ins.length <= 1) return true;
-    }
-    if (unitDevoid(id)) return true;  // 整单元无文本 → 透明转发，多出边只是调度细节
-    if (role !== 'code') return false;  // 非 code 的多出边 = 结构枢纽
-    // code 空节点：如果所有出边都是 branch/join/loop（无 next/teleport/goto），可以短路
-    const allFlow = outs.every(e => e.kind === 'branch' || e.kind === 'join' || e.kind === 'loop');
-    if (allFlow && outs.length <= 8) return true;
-    return false;
-  };
-
-  // BFS 式局部更新
-  const queue: string[] = [];
-  const enqueued = new Set<string>();
-  const enqueue = (id: string) => {
-    if (enqueued.has(id)) return;
-    const n = nodes.get(id);
-    if (!n || !isRemovable(n)) return;
-    enqueued.add(id);
-    queue.push(id);
-  };
-  for (const [id, n] of nodes) if (isRemovable(n) && outFanOutOk(id, n.role, outIdx.get(id) ?? [])) enqueue(id);
-
-  const removed = new Set<string>();
-  while (queue.length > 0) {
-    const id = queue.pop()!;
-    const n = nodes.get(id);
-    if (!n || removed.has(id)) continue;
-    if (!isRemovable(n)) continue;
-    const outs = liveOut(id);
     const ins = liveIn(id);
+    // 入边 ≤ 1 的多出边空节点：短路只产生 1×N 条新边，无笛卡尔积膨胀——
+    // 无入边的入口型（初始房间分叉）/ 单入边的中继型（自动页入口即转移）
+    // 都不是剧情枢纽；尤其是后者，不消除会挡住剧情链（如传送中继 M5E3P1）。
+    if (ins.length <= 1) return true;
+    // 多入多出空节点（IF/循环的汇合锚点、join 链）：只要 ins×outs 不超限即可短路，
+    // 直接连接前后文本节点、消除纯流程残留。上限只是防笛卡尔积爆炸，
+    // 与单元是否含文本无关——含文本单元里的 join 链同样只是结构，不该保留。
+    return ins.length * outs.length <= 50;
+  };
 
-    // 入口型多出边空节点（无入边，如初始房间分叉）：消除并丢弃出边——
-    // 它只是代码入口不是剧情枢纽，删除后出边各自悬空，图自然裂开。
-    if (outs.length > 1 && ins.length === 0) {
+  // 不动点精简：反复扫描并短路所有"安全"的空节点（无文本 + 扇出受限），
+  // 直到无节点可删。每轮基于当前 in/out 度重新判定，避免一次性队列里
+  // 因邻居合并导致度变化让某些节点被永久跳过（残留空节点）——被本轮
+  // 跳过的节点会在下一轮重新判定，最终收敛到「能删的全删、超限的当枢纽保留」。
+  const removed = new Set<string>();
+  let progress = true;
+  while (progress) {
+    progress = false;
+    // 快照本轮候选（按当前 live 度判定）
+    const candidates: string[] = [];
+    for (const [id, n] of nodes) {
+      if (!isRemovable(n)) continue;
+      if (outFanOutOk(id, n.role, liveOut(id))) candidates.push(id);
+    }
+    for (const id of candidates) {
+      const n = nodes.get(id);
+      if (!n || removed.has(id)) continue;
+      const outs = liveOut(id);
+      const ins = liveIn(id);
+
+      // 入口型多出边空节点（无入边，如初始房间分叉）：消除并丢弃出边——
+      // 它只是代码入口不是剧情枢纽，删除后出边各自悬空，图自然裂开。
+      if (outs.length > 1 && ins.length === 0) {
+        removed.add(id);
+        nodes.delete(id);
+        for (const e of outs) dead.add(e);
+        progress = true;
+        continue;
+      }
+      // 复检：度可能在本轮前面节点的短路中变化，此刻仍超限则延后到下一轮。
+      if (!outFanOutOk(id, n.role, outs)) continue;
+
       removed.add(id);
       nodes.delete(id);
+      for (const e of ins) dead.add(e);
       for (const e of outs) dead.add(e);
-      continue;
-    }
-    if (outs.length > 1 && ins.length > 1 && !unitDevoid(id)) continue; // 多入多出枢纽，保留
 
-    removed.add(id);
-    nodes.delete(id);
-    for (const e of ins) dead.add(e);
-    for (const e of outs) dead.add(e);
-
-    // 短路：每个入边 × 唯一出边（最多 1 条）
-    for (const ie of ins) {
-      for (const oe of outs) {
-        if (oe.to === ie.from) continue; // 自环
-        const useOut = !TRANSPARENT.has(oe.kind);
-        const ne: MinEdge = {
-          from: ie.from,
-          to: oe.to,
-          kind: useOut ? oe.kind : ie.kind,
-          note: useOut ? (oe.note ?? ie.note) : (ie.note ?? oe.note),
-          ret: ie.ret ?? oe.ret,
-        };
-        edges.push(ne);
-        pushIdx(outIdx, ne.from, ne);
-        pushIdx(inIdx, ne.to, ne);
-        const tn = nodes.get(ne.to);
-        if (tn && isRemovable(tn)) enqueue(ne.to);
+      // 短路：每个入边 × 每个出边
+      for (const ie of ins) {
+        for (const oe of outs) {
+          if (oe.to === ie.from) continue; // 自环
+          const useOut = !TRANSPARENT.has(oe.kind);
+          const ne: MinEdge = {
+            from: ie.from,
+            to: oe.to,
+            kind: useOut ? oe.kind : ie.kind,
+            note: useOut ? (oe.note ?? ie.note) : (ie.note ?? oe.note),
+            ret: ie.ret ?? oe.ret,
+          };
+          edges.push(ne);
+          pushIdx(outIdx, ne.from, ne);
+          pushIdx(inIdx, ne.to, ne);
+        }
       }
+      progress = true;
     }
   }
 

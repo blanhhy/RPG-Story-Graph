@@ -31,6 +31,15 @@ body { background: var(--bg); color: var(--text); }
 .stats { color: var(--muted); font-size: 12px; }
 .error { color: #ff7b72; font-size: 13px; }
 
+/* 排列方向切换（顶栏分段控件） */
+.rank-toggle { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.rank-toggle button {
+  background: transparent; border: none; color: var(--muted);
+  padding: 6px 12px; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.rank-toggle button + button { border-left: 1px solid var(--border); }
+.rank-toggle button.active { background: var(--brand); color: #fff; }
+
 .main { flex: 1; display: flex; min-height: 0; }
 
 /* ---- sidebar ---- */
@@ -82,13 +91,13 @@ body { background: var(--bg); color: var(--text); }
 .flow-controls button:hover { background: var(--panel2); }
 
 .story-node {
-  width: 132px; min-height: 40px; border-radius: 8px; padding: 4px 8px;
-  background: var(--panel2); border: 1.5px solid var(--border); font-size: 11px; position: relative;
+  width: 100px; min-height: 30px; border-radius: 6px; padding: 3px 6px;
+  background: var(--panel2); border: 1.5px solid var(--border); font-size: 10px; position: relative;
 }
 .story-node.is-terminal { border-color: #e8463a; }
-.story-id { color: var(--brand); font-weight: 700; font-size: 10px; margin-bottom: 2px; }
+.story-id { color: var(--brand); font-weight: 700; font-size: 9px; margin-bottom: 1px; }
 .story-text {
-  color: var(--text); line-height: 1.4; word-break: break-all;
+  color: var(--text); line-height: 1.35; word-break: break-all;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 .anchor-node {
@@ -140,5 +149,16 @@ body { background: var(--bg); color: var(--text); }
 .elink:hover { text-decoration: underline; }
 .enote { color: var(--muted); font-size: 11px; }
 .muted { color: var(--muted); }
+
+/* ---- edge labels ---- */
+/* ReactFlow 默认给边标签白色背景 + 边框，在深色主题上变成刺眼白方块。
+   去掉背景和边框，只保留文字颜色，让标签融入深色画布。 */
+.react-flow__edge-textwrapper { padding: 0; }
+.react-flow__edge-text {
+  fill: var(--muted) !important;
+  font-size: 9px !important;
+  background: none !important;
+}
+.react-flow__edge-textbg { display: none !important; }
 
 /* dark panel 复用同一套；不再定义 light 主题（工具默认深色） */

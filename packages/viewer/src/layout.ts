@@ -9,11 +9,11 @@ import type { StoryGraph } from '@storygraph/core';
  * barycenter（前驱列内平均序号）排序 y，减少跨列边交叉。
  */
 
-const NODE_W = 148;
-const NODE_H = 44;
-const EMPTY_W = 26;
-const EMPTY_H = 26;
-const RANK_SEP = 34;
+const NODE_W = 100;
+const NODE_H = 56;
+const EMPTY_W = 16;
+const EMPTY_H = 16;
+const RANK_SEP = 28;
 const NODE_SEP = 14;
 
 function bfsDepth(g: StoryGraph): Map<string, number> {
@@ -108,7 +108,7 @@ export function layoutGraph(
   if (rankdir !== 'LR') {
     const dag = new dagre.graphlib.Graph();
     dag.setDefaultEdgeLabel(() => ({}));
-    dag.setGraph({ rankdir, nodesep: 14, ranksep: 34, marginx: 16, marginy: 16 });
+    dag.setGraph({ rankdir, nodesep: 8, ranksep: 20, marginx: 16, marginy: 16 });
     const ids = new Set(g.nodes.map(n => n.id));
     for (const n of g.nodes) dag.setNode(n.id, { width: n.hasText ? NODE_W : EMPTY_W, height: n.hasText ? NODE_H : EMPTY_H });
     for (const e of g.edges) if (ids.has(e.to) && ids.has(e.from)) dag.setEdge(e.from, e.to);

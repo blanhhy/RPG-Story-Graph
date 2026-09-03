@@ -17,6 +17,7 @@ export default function App() {
   const [game, setGame] = useState<ViewerGameGraph | null>(null);
   const [current, setCurrent] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [rankDir, setRankDir] = useState<'LR' | 'TB'>('LR');
   const rfKey = useRef(0);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -104,6 +105,16 @@ export default function App() {
           {busy ? '解析中…' : '解析'}
         </button>
         <button className="ghost" onClick={() => fileRef.current?.click()}>加载 JSON</button>
+        <div className="rank-toggle" title="排列方向">
+          <button
+            className={rankDir === 'LR' ? 'active' : ''}
+            onClick={() => setRankDir('LR')}
+          >横向</button>
+          <button
+            className={rankDir === 'TB' ? 'active' : ''}
+            onClick={() => setRankDir('TB')}
+          >纵向</button>
+        </div>
         <input
           ref={fileRef}
           type="file"
@@ -124,7 +135,7 @@ export default function App() {
         <div className="canvas-wrap" key={rfKey.current}>
           {currentGraph ? (
             <ReactFlowProvider>
-              <GraphCanvas graph={currentGraph} onSelect={setSelected} />
+              <GraphCanvas graph={currentGraph} rankDir={rankDir} onSelect={setSelected} />
             </ReactFlowProvider>
           ) : (
             <div className="placeholder">
