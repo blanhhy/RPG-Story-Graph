@@ -1,0 +1,20 @@
+{
+  "name": "rpg-story-graph",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.10.0",
+  "description": "RPG Maker 2000/2003 剧情图分析：解析事件代码构造剧情节点图，供翻译 / 剧情整理工具使用",
+  "scripts": {
+    "storygraph": "tsx packages/core/src/cli.ts",
+    "typecheck": "tsc --noEmit -p packages/core"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}

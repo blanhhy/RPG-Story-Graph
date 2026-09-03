@@ -1,0 +1,17 @@
+{
+  "name": "@storygraph/core",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "剧情图核心库：解析 RM2K/2K3 事件代码 → 剧情节点图 → 精简",
+  "main": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "iconv-lite": "^0.7.3",
+    "rpgrt": "^0.2.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
