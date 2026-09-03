@@ -39,11 +39,33 @@ export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
     const a = m.get(k);
     if (a) a.push(e); else m.set(k, [e]);
   };
-  for (const e of raw.edges) {
-    const ne: MinEdge = { from: e.from, to: e.to, kind: e.kind, ret: e.ret, note: e.note };
-    edges.push(ne);
-    pushIdx(outIdx, ne.from, ne);
-    pushIdx(inIdx, ne.to, ne);
+  // 前置折叠：同 (from,to) 平行边合并为一条（kind 优先保留更"连续"的类别：
+  // next/join/loop > teleport > branch ...）。同一对节点常有多条 kind 边
+  // （分支汇合 next + 条件假 branch），它们表达"无论条件真假都到达同一处"，
+  // 不折叠会让空节点出入度虚高，被当成多入多出枢纽而无法短路（大串 IF 调度）。
+  const KIND_PREF: EdgeKind[] = ['next', 'join', 'loop', 'teleport', 'call', 'goto', 'branch', 'return', 'terminal'];
+  {
+    const fold = new Map<string, MinEdge>();
+    for (const e of raw.edges) {
+      if (e.from === e.to) continue;
+      const k = `${e.from}|${e.to}`;
+      const old = fold.get(k);
+      if (!old) { fold.set(k, { ...e }); continue; }
+      const ki = KIND_PREF.indexOf(old.kind as EdgeKind);
+      const kj = KIND_PREF.indexOf(e.kind as EdgeKind);
+      const merged: MinEdge = {
+        from: old.from, to: old.to,
+        kind: ki <= kj ? old.kind : e.kind as EdgeKind,
+        ret: old.ret ?? e.ret,
+        note: e.note ?? old.note,
+      };
+      fold.set(k, merged);
+    }
+    for (const e of fold.values()) {
+      edges.push(e);
+      pushIdx(outIdx, e.from, e);
+      pushIdx(inIdx, e.to, e);
+    }
   }
   const liveOut = (id: string) => (outIdx.get(id) ?? []).filter(e => !dead.has(e));
   const liveIn = (id: string) => (inIdx.get(id) ?? []).filter(e => !dead.has(e));
@@ -52,6 +74,16 @@ export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
     // 无文本 = 无效子图的组成部分（纯代码流位置），一律可短路
     return !n.hasText;
   };
+
+  // 整单元无文本（纯调度页/工具页）：其内部 join/entry 等结构节点没有任何剧情承载，
+  // 折叠只做"入×出"的透明转发，不受多入多出枢纽限制（如大串 IF 的开关检查调度）。
+  const unitNoText = new Set<string>();
+  {
+    const textUnit = new Set<string>();
+    for (const n of raw.nodes) if (n.hasText) textUnit.add(n.unit);
+    for (const n of raw.nodes) if (!textUnit.has(n.unit)) unitNoText.add(n.unit);
+  }
+  const unitDevoid = (id: string) => unitNoText.has(id.split('#')[0]);
 
   const outFanOutOk = (id: string, role: string, outs: MinEdge[]): boolean => {
     if (outs.length <= 1) return true;  // 单向中继
@@ -62,6 +94,7 @@ export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
       // 都不是剧情枢纽；尤其是后者，不消除会挡住剧情链（如上图的传送中继 M5E3P1）。
       if (ins.length <= 1) return true;
     }
+    if (unitDevoid(id)) return true;  // 整单元无文本 → 透明转发，多出边只是调度细节
     if (role !== 'code') return false;  // 非 code 的多出边 = 结构枢纽
     // code 空节点：如果所有出边都是 branch/join/loop（无 next/teleport/goto），可以短路
     const allFlow = outs.every(e => e.kind === 'branch' || e.kind === 'join' || e.kind === 'loop');
@@ -98,7 +131,7 @@ export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
       for (const e of outs) dead.add(e);
       continue;
     }
-    if (outs.length > 1 && ins.length > 1) continue; // 多入多出枢纽，保留
+    if (outs.length > 1 && ins.length > 1 && !unitDevoid(id)) continue; // 多入多出枢纽，保留
 
     removed.add(id);
     nodes.delete(id);
@@ -126,20 +159,16 @@ export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
     }
   }
 
-  // 组装：去死边、去自环、同 (from,to,kind) 去重
+  // 组装：去死边、去自环（平行边已在前置折叠）
   const finalEdges: MinEdge[] = [];
-  const seen = new Map<string, MinEdge>();
+  const seen = new Set<string>();
   for (const e of edges) {
     if (dead.has(e) || e.from === e.to) continue;
-    const k = `${e.from}|${e.to}|${e.kind}`;
-    const old = seen.get(k);
-    if (!old) seen.set(k, e);
-    else {
-      const merged = mergeEdge(old, e);
-      if (merged.ret !== old.ret || merged.note !== old.note) seen.set(k, merged);
-    }
+    const k = `${e.from}|${e.to}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    finalEdges.push(e);
   }
-  for (const e of seen.values()) finalEdges.push(e);
 
   return mergeLinearTextNodes({
     ...raw,
