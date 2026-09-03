@@ -11,6 +11,7 @@ const CALL_CMDEVT = 1005;      // 2k3 战斗解释器里的公共事件调用
 const CALL_EVENT = 12330;      // 参数[0]==0 → 公共事件；其他 → 事件页
 const TELEPORT = 10810;
 const RECALL = 10830;          // 运行时行为，不作切分、不产生静态边
+const CONTROL_SWITCHES = 10210; // 开关操作：设置开关 ON/OFF（用于识别"事件页切换"激活）
 const MESSAGE = new Set([10110, 20110, 10140, 20140, 10610]); // 显示有效承载
 
 // 块 = 连续执行的"非流程"命令（其中可含对话）。流程命令做切分点。
@@ -32,7 +33,7 @@ const FLOW = new Set([
 ]);
 
 type Succ =
-  | { kind: 'next'; to: string }
+  | { kind: 'next'; to: string; note?: string }
   | { kind: 'branch'; to: string; note?: string }  // IF/ELSE 多候选
   | { kind: 'join'; to: string; note?: string }    // 分支/循环/选项汇合到公共
   | { kind: 'call'; to: string; ret?: string; note?: string }
@@ -48,6 +49,10 @@ export interface ExecUnit {
   label: string;
   trigger: number;  // 事件页触发器；公共事件同 liblcf 语义
   cmds: EventCommand[];
+  /** 事件页激活条件：需要的开关 id 列表（空 = 无条件，进图即按触发器运行）。
+   * 有条件的事件页（如"开关12 为 ON 才出现"）不会被进图传送直接触发，
+   * 而是由设置该开关的前置单元激活。 */
+  condSwitchIds?: number[];
 }
 
 /** 构建上下文：仅需数据源（本工具只从游戏内显示文本出发，不依赖地图名等元数据） */
@@ -95,11 +100,17 @@ export function collectUnits(loaded: LoadedGame, ctx: BuildCtx): ExecUnit[] {
       (e.pages ?? []).forEach((pg: any, pi: number) => {
         if (!hasRealCmd(pg.eventCommands)) return;
         const trig = pg.trigger ?? 0;
+        const cond = pg.condition ?? {};
+        const condSwitchIds: number[] = [];
+        const flags = cond.flags ?? {};
+        if (flags.switchA && cond.switchAId != null) condSwitchIds.push(cond.switchAId);
+        if (flags.switchB && cond.switchBId != null) condSwitchIds.push(cond.switchBId);
         units.push({
           key: `M${mid}E${e.id}P${pi + 1}`,
           label: `Map${mid} 事件${e.id} 第${pi + 1}页`,
           trigger: trig,
           cmds: pg.eventCommands,
+          condSwitchIds,
         });
       });
     }
@@ -360,6 +371,11 @@ function analyzeUnit(u: ExecUnit, ctx: BuildCtx): StoryBlock[] {
         const isCE = u.key.startsWith('CE#');
         from.succ.push({ kind: 'teleport', to: `Map${String(mapId).padStart(4, '0')}`, note: '换图' + (isCE ? '，公共事件跨图继续' : '') });
         if (!isCE) suppressed.add(from);
+        // 传送后：地图事件对象随图卸载，但当前调用不会立即终止（官方实现里是未定义
+        // 行为）；开发者仍可能留一两条清理命令（如设置开关），这些命令会继续执行。
+        // 让它们 append 回传送块（而不是切出独立块），使"传送→清理→激活后续剧情"保持
+        // 同一连通，避免传送块与清理块断连导致连续剧情流裂开。
+        cur = from;
       }
       // 目标剧情不可达的跨图传送 / 同图传送：不打断当前对话流（透明）
     } else if (code === 10) {
@@ -504,9 +520,40 @@ export function buildStoryGraphs(units: ExecUnit[], ctx: BuildCtx): { graphs: St
     }
   }
 
+  // 提取单元设置 ON 的开关 id（单个 ON op=0；范围 ON op=2）。
+  // 提前定义：mapEntries（后处理2）和开关激活（后处理3）都要用。
+  const setSwitchesOn = (u: ExecUnit): Set<number> => {
+    const res = new Set<number>();
+    for (const c of u.cmds) {
+      if (c.code !== CONTROL_SWITCHES) continue;
+      const p = c.parameters ?? [];
+      const op = p[0]; const a = p[1]; const b = p[2] ?? a;
+      if (op === 0) res.add(a);
+      else if (op === 2) { for (let s = a; s <= b; s++) res.add(s); }
+    }
+    return res;
+  };
+
+  // 同事件页切换：条件页 B 需要开关 S，且同事件的另一页 A 设置 S（如"事件页1 说完话
+  // 设置开关 → 事件页2 显示选项"）。这种 B 是页切换，应由开关激活连接（后处理3），
+  // 不应被进图传送连（否则选项分支会错误地挂到上一个地图的传送源）。
+  const pageSwitchKeys = new Set<string>();
+  for (const u of units) {
+    if (!u.condSwitchIds?.length) continue;
+    const m = u.key.match(/^M(\d+)E(\d+)P(\d+)$/);
+    if (!m) continue;
+    const eventKey = `M${m[1]}E${m[2]}`;
+    for (const other of units) {
+      if (other.key === u.key) continue;
+      const om = other.key.match(/^M(\d+)E(\d+)P(\d+)$/);
+      if (!om || `M${om[1]}E${om[2]}` !== eventKey) continue;
+      if (u.condSwitchIds.some(sid => setSwitchesOn(other).has(sid))) { pageSwitchKeys.add(u.key); break; }
+    }
+  }
+
   // 后处理2：地图间连接 —— 跨图传送边 → 目标地图上所有自动/并行事件页的入口节点。
-  // 目标地图剧情可达（含中继地图）时：进图即运行的自动/并行页都是入口，
-  // 无文本的中继页（如"到了就转移去下一张图"）也在其中，保证传送链不断裂。
+  // 有条件页分两种：同事件页切换（pageSwitchKeys，由开关激活连接，跳过）与跨事件
+  // 状态推进（主线桥梁，如"探索完自动传送"，保留进图传送以维持主线连通）。
   const mapEntries = new Map<number, string[]>();
   {
     const mapStory = ctx.mapStoryReachable!;
@@ -514,6 +561,7 @@ export function buildStoryGraphs(units: ExecUnit[], ctx: BuildCtx): { graphs: St
       const m = u.key.match(/^M(\d+)E(\d+)P(\d+)$/);
       if (!m) continue;
       if (u.trigger !== 3 && u.trigger !== 4) continue;
+      if (pageSwitchKeys.has(u.key)) continue;  // 同事件页切换：由开关激活连接
       const mid = +m[1];
       if (!mapStory.get(mid)) continue;
       const arr = mapEntries.get(mid) ?? [];
@@ -538,6 +586,40 @@ export function buildStoryGraphs(units: ExecUnit[], ctx: BuildCtx): { graphs: St
         out.push(s);
       }
       b.succ = out;
+    }
+  }
+
+  // 后处理3：开关激活连接 —— 单元 A 设置开关 S 为 ON，同地图上需要开关 S 的
+  // 自动/并行条件页 B 会被激活（如"事件页1 说完话设置开关 → 事件页2 显示选项"）。
+  // 建立 A 末尾块 → B 入口 的连接，让选项分支等有条件剧情挂到正确的前置单元上，
+  // 而不是被进图传送（后处理2）错误地直接挂到上一个地图。
+  {
+    // 需要每个开关的同地图条件页：switchId -> unit keys
+    const unitsBySwitch = new Map<number, string[]>();
+    for (const u of units) {
+      if (!u.condSwitchIds?.length) continue;
+      if (u.trigger !== 3 && u.trigger !== 4) continue;
+      for (const sid of u.condSwitchIds) {
+        const arr = unitsBySwitch.get(sid) ?? [];
+        arr.push(u.key);
+        unitsBySwitch.set(sid, arr);
+      }
+    }
+    for (const u of units) {
+      const switches = setSwitchesOn(u);
+      if (!switches.size) continue;
+      const blocks = blocksByUnit.get(u.key);
+      if (!blocks?.length) continue;
+      const src = blocks[blocks.length - 1];
+      for (const sid of switches) {
+        const targets = unitsBySwitch.get(sid) ?? [];
+        for (const tkey of targets) {
+          if (tkey === u.key) continue;
+          // 开关是全局状态，设置开关 S 的单元会激活任何需要 S 的条件页，
+          // 不限于同地图（如"前一章说完话设置开关 → 下一章条件页激活"）。
+          src.succ.push({ kind: 'next', to: `${tkey}#0`, note: '开关激活' });
+        }
+      }
     }
   }
 

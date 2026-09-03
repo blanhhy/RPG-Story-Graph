@@ -203,6 +203,7 @@ function mergeLinearTextNodes(graph: StoryGraph): StoryGraph {
       if (!A || !B || !A.hasText || !B.hasText) continue;
       if ((outs.get(A.id) ?? 0) !== 1) continue; // A 有分支，保留
       if ((ins.get(B.id) ?? 0) !== 1) continue;  // B 有汇合，保留
+      if ((outs.get(B.id) ?? 0) !== 1) continue; // B 有分支（如提出选项/传送分叉），保留
       // 合并：B 的文本并入 A，B 的出边改挂到 A，B 节点删除
       A.text = [A.text, B.text].filter(Boolean).join(' / ');
       for (const oe of edges) {
