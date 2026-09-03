@@ -7,3 +7,5 @@ docs/
 
 *.log
 story-*.json
+
+_*

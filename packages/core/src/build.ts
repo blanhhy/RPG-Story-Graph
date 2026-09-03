@@ -53,6 +53,10 @@ export interface ExecUnit {
 /** 构建上下文：仅需数据源（本工具只从游戏内显示文本出发，不依赖地图名等元数据） */
 export interface BuildCtx {
   loaded: LoadedGame;
+  /** 单元剧情可达性：自身含文本，或经调用链递归可达含文本单元（用于把纯工具调用透明化） */
+  textReachable?: Map<string, boolean>;
+  /** 地图剧情可达性：该图上是否存在含文本的自动/并行事件页（用于把纯机制传送透明化） */
+  mapStoryReachable?: Map<number, boolean>;
 }
 
 /**
@@ -108,6 +112,64 @@ export function collectUnits(loaded: LoadedGame, ctx: BuildCtx): ExecUnit[] {
     });
   }
   return units;
+}
+
+// ---- 剧情可达性分析 ----
+// 一个执行单元"剧情可达" = 自身含显示文本，或递归调用链上可到达含文本单元。
+// 换句话说：call 目标子图（可能是很多节点构成的完整子图）只要整体不含文本，
+// 它就是一个纯逻辑工具函数——调用它对剧情流无影响，切分时应透明化。
+const CALL_TARGETS = [CALL_CMDEVT, CALL_EVENT];
+
+/** 解析 call 命令的目标单元 key（与 analyzeUnit 中 call 分支保持一致） */
+export function callTargetKey(u: ExecUnit, c: EventCommand): string {
+  if (c.code === CALL_CMDEVT) return `CE#${c.parameters?.[0] ?? 0}`;
+  const p = c.parameters ?? [];
+  const id = p[1]; const page = p[2] ?? 0;
+  const m = u.key.match(/^M(\d+)E(\d+)P(\d+)$/);
+  if (p[0] === 0) return `CE#${id}`;
+  if (id === 10005) return m ? `M${m[1]}E${m[2]}P${page}` : `当前事件P${page}`;
+  return `M${m ? m[1] : 0}E${id}P${page}`;
+}
+
+/** 计算所有单元的剧情可达性（记忆化 DFS，防环） */
+export function computeTextReachable(units: ExecUnit[]): Map<string, boolean> {
+  const keys = new Set(units.map(u => u.key));
+  // 自身是否含文本
+  const ownText = new Map<string, boolean>();
+  for (const u of units) {
+    ownText.set(u.key, u.cmds.some(c => MESSAGE.has(c.code)));
+  }
+  // 出边：该单元调用哪些单元
+  const outs = new Map<string, string[]>();
+  for (const u of units) {
+    const arr: string[] = [];
+    for (const c of u.cmds) {
+      if (!CALL_TARGETS.includes(c.code)) continue;
+      const t = callTargetKey(u, c);
+      if (keys.has(t)) arr.push(t);
+    }
+    outs.set(u.key, arr);
+  }
+  const memo = new Map<string, boolean>();
+  const visiting = new Set<string>();
+
+  const reach = (k: string): boolean => {
+    if (ownText.get(k)) return true;              // 自身有文本 → 可达（不用再查出边）
+    if (memo.has(k)) return memo.get(k)!;
+    if (visiting.has(k)) return false;            // 环：先假设不可达（环内无文本已在 ownText 查过）
+    visiting.add(k);
+    let r = false;
+    for (const nxt of outs.get(k) ?? []) {
+      if (reach(nxt)) { r = true; break; }
+    }
+    visiting.delete(k);
+    memo.set(k, r);
+    return r;
+  };
+
+  const result = new Map<string, boolean>();
+  for (const u of units) result.set(u.key, reach(u.key));
+  return result;
 }
 
 // ---- 节点切分 ----
@@ -172,6 +234,13 @@ function analyzeUnit(u: ExecUnit, ctx: BuildCtx): StoryBlock[] {
     const c = cmds[i];
     const code = c.code;
     if (!FLOW.has(code)) { append(c, i); continue; }
+
+    // 纯工具调用（目标子图剧情不可达，即无文本且调不到文本）→ 透明化：
+    // call 子图相当于被删除，不打断当前对话流，命令并入当前块。
+    if ((code === CALL_CMDEVT || code === CALL_EVENT) && !ctx.textReachable?.get(callTargetKey(u, c))) {
+      append(c, i);
+      continue;
+    }
 
     if (code === 12010 || code === 13310 || code === 12210 || code === 10140) {
       close();
@@ -262,17 +331,20 @@ function analyzeUnit(u: ExecUnit, ctx: BuildCtx): StoryBlock[] {
       cur = ret;
     } else if (code === TELEPORT) {
       // 跨图传送 → 地图事件随图卸载、本页结束；公共事件跨图继续 → 保留 next。
+      // 目标地图剧情不可达（没有含文本的自动/并行事件）→ 纯机制传送（走过去再回来）→ 透明化，不切分。
       // 同图传送不出边，next 兜底续上；RECALL(10830) 运行时行为，不产生静态边。
-      close();
-      const from = lastBlock() ?? newBlock('entry');
-      const isCE = u.key.startsWith('CE#');
+      const mapId = c.parameters?.[0];
       const m = u.key.match(/^M(\d+)E/);
       const curMid = m ? +m[1] : 0;
-      const mapId = c.parameters?.[0];
-      if (mapId != null && mapId !== curMid) {
+      const mapStory = ctx.mapStoryReachable?.get(mapId ?? -1);
+      if (mapId != null && mapId !== curMid && mapStory) {
+        close();
+        const from = lastBlock() ?? newBlock('entry');
+        const isCE = u.key.startsWith('CE#');
         from.succ.push({ kind: 'teleport', to: `Map${String(mapId).padStart(4, '0')}`, note: '换图' + (isCE ? '，公共事件跨图继续' : '') });
         if (!isCE) suppressed.add(from);
       }
+      // 目标剧情不可达的跨图传送 / 同图传送：不打断当前对话流（透明）
     } else if (code === 10) {
       close();
     }
@@ -315,6 +387,43 @@ export interface BuildStats {
 
 // ---- 模块1：建图（切分 + 全局后处理） ----
 export function buildStoryGraphs(units: ExecUnit[], ctx: BuildCtx): { graphs: StoryGraph[]; stats: BuildStats } {
+  // 剧情可达性：供 analyzeUnit 把纯工具调用透明化（不切分）
+  if (!ctx.textReachable) ctx.textReachable = computeTextReachable(units);
+  // 地图剧情可达性：地图上的自动(3)/并行(4)事件能推进剧情才叫"传送有剧情意义"。
+  // 含文本的自动/并行页 = 剧情地图；不含文本但会连锁转移到剧情地图的自动/并行页
+  // （纯中继传地图，如"走到下一张图"的过渡页）= 同一剧情链上的中继地图，也算可达。
+  if (!ctx.mapStoryReachable) {
+    const mapStory = new Map<number, boolean>();
+    const outs = new Map<number, Set<number>>();
+    for (const u of units) {
+      const m = u.key.match(/^M(\d+)E(\d+)P(\d+)$/);
+      if (!m) continue;
+      if (u.trigger !== 3 && u.trigger !== 4) continue;
+      const mid = +m[1];
+      if (u.cmds.some(c => MESSAGE.has(c.code))) mapStory.set(mid, true);
+      for (const c of u.cmds) {
+        if (c.code !== TELEPORT) continue;
+        const tId = c.parameters?.[0] as number;
+        if (tId != null && tId !== mid) {
+          const s = outs.get(mid) ?? new Set<number>();
+          s.add(tId);
+          outs.set(mid, s);
+        }
+      }
+    }
+    // 不变点传播：中继地图链末端能到剧情地图 → 沿途全是剧情地图
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [mid, targets] of outs) {
+        if (mapStory.get(mid)) continue;
+        for (const t of targets) {
+          if (mapStory.get(t)) { mapStory.set(mid, true); changed = true; break; }
+        }
+      }
+    }
+    ctx.mapStoryReachable = mapStory;
+  }
   const allBlocks: StoryBlock[] = [];
   const blocksByUnit = new Map<string, StoryBlock[]>();
   const callEdges: { from: string; to: string }[] = [];
@@ -377,17 +486,18 @@ export function buildStoryGraphs(units: ExecUnit[], ctx: BuildCtx): { graphs: St
     }
   }
 
-  // 后处理2：地图间连接 —— 跨图传送边 → 目标地图上所有"有文本"的自动/并行页入口节点。
+  // 后处理2：地图间连接 —— 跨图传送边 → 目标地图上所有自动/并行事件页的入口节点。
+  // 目标地图剧情可达（含中继地图）时：进图即运行的自动/并行页都是入口，
+  // 无文本的中继页（如"到了就转移去下一张图"）也在其中，保证传送链不断裂。
   const mapEntries = new Map<number, string[]>();
   {
-    const unitTextSet = new Set<string>();
-    for (const b of allBlocks) if (b.hasText) unitTextSet.add(b.unit);
+    const mapStory = ctx.mapStoryReachable!;
     for (const u of units) {
       const m = u.key.match(/^M(\d+)E(\d+)P(\d+)$/);
       if (!m) continue;
       if (u.trigger !== 3 && u.trigger !== 4) continue;
-      if (!unitTextSet.has(u.key)) continue;
       const mid = +m[1];
+      if (!mapStory.get(mid)) continue;
       const arr = mapEntries.get(mid) ?? [];
       arr.push(`${u.key}#0`);
       mapEntries.set(mid, arr);
