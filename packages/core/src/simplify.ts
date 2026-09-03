@@ -86,16 +86,12 @@ export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
   };
 
   const outFanOutOk = (id: string, role: string, outs: MinEdge[]): boolean => {
-    if (outs.length <= 1) return true;  // 单向中继
+    // 空节点 = 线，不承载剧情，理论上应全部短路。仅用一个硬上限防止
+    // "多入多出枢纽"做 ins×outs 笛卡尔积时边数爆炸（如几十场景汇聚又发散）。
+    // 阈值设得足够宽：正常分支枢纽（十几个入 × 几个出）都能消，
+    // 只有真正的大规模扇出结构（如公共事件总调度器）才保留为占位枢纽。
     const ins = liveIn(id);
-    // 入边 ≤ 1 的多出边空节点：短路只产生 1×N 条新边，无笛卡尔积膨胀——
-    // 无入边的入口型（初始房间分叉）/ 单入边的中继型（自动页入口即转移）
-    // 都不是剧情枢纽；尤其是后者，不消除会挡住剧情链（如传送中继 M5E3P1）。
-    if (ins.length <= 1) return true;
-    // 多入多出空节点（IF/循环的汇合锚点、join 链）：只要 ins×outs 不超限即可短路，
-    // 直接连接前后文本节点、消除纯流程残留。上限只是防笛卡尔积爆炸，
-    // 与单元是否含文本无关——含文本单元里的 join 链同样只是结构，不该保留。
-    return ins.length * outs.length <= 50;
+    return ins.length * outs.length <= 400;
   };
 
   // 不动点精简：反复扫描并短路所有"安全"的空节点（无文本 + 扇出受限），
@@ -106,13 +102,18 @@ export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
   let progress = true;
   while (progress) {
     progress = false;
-    // 快照本轮候选（按当前 live 度判定）
-    const candidates: string[] = [];
+    // 快照本轮候选，并按 ins×outs 升序排序：先短路度小的空节点（label 链、单向中继），
+    // 避免多入多出枢纽在邻居尚未消解前就度虚高、被误判保留。
+    const candidates: { id: string; score: number }[] = [];
     for (const [id, n] of nodes) {
       if (!isRemovable(n)) continue;
-      if (outFanOutOk(id, n.role, liveOut(id))) candidates.push(id);
+      const outs = liveOut(id);
+      if (!outFanOutOk(id, n.role, outs)) continue;
+      const ins = liveIn(id);
+      candidates.push({ id, score: ins.length * outs.length });
     }
-    for (const id of candidates) {
+    candidates.sort((a, b) => a.score - b.score);
+    for (const { id } of candidates) {
       const n = nodes.get(id);
       if (!n || removed.has(id)) continue;
       const outs = liveOut(id);

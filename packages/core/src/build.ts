@@ -217,12 +217,17 @@ function analyzeUnit(u: ExecUnit, ctx: BuildCtx): StoryBlock[] {
   let pendingCaseFrom: StoryBlock | null = null;
   // show choice 前的块（case parent）：已用 branch 覆盖所有选项，收尾时不得再补 next。
   const caseParents = new Set<StoryBlock>();
+  // IF 条件：真分支也应显式 branch。真分支入口用 pendingTrueFrom 关联到 if 体首块，
+  // 假分支沿用 pendingFalseFrom。条件父块已发出真/假两条 branch，收尾不得再补 next。
+  let pendingTrueFrom: StoryBlock | null = null;
+  const ifParents = new Set<StoryBlock>();
   let cur: StoryBlock | null = null;
 
   const newBlock = (role: NodeRole): StoryBlock => {
     const b: StoryBlock = { unit: u.key, id: `${u.key}#${blocks.length}`, role, range: null, hasText: false, text: '', succ: [] };
     if (pendingFalseFrom) { pendingFalseFrom.succ.push({ kind: 'branch', to: b.id, note: '条件假' }); pendingFalseFrom = null; }
     if (pendingCaseFrom) { pendingCaseFrom.succ.push({ kind: 'branch', to: b.id, note: '选项' }); pendingCaseFrom = null; }
+    if (pendingTrueFrom) { pendingTrueFrom.succ.push({ kind: 'branch', to: b.id, note: '条件真' }); pendingTrueFrom = null; }
     blocks.push(b);
     return b;
   };
@@ -255,6 +260,7 @@ function analyzeUnit(u: ExecUnit, ctx: BuildCtx): StoryBlock[] {
       const kind = (code === 12210 ? 'loop' : code === 10140 ? 'case' : 'if') as Scope['kind'];
       scopes.push({ kind, fromIdx: blocks.length, parent, hadElse: false, tails: [] });
       if (kind === 'case') { pendingCaseFrom = parent; if (parent) caseParents.add(parent); }  // 每个选项块 branch 到 show choice 前的块
+      else if (kind === 'if') { pendingTrueFrom = parent; if (parent) ifParents.add(parent); }  // 真分支：if 体入口 ← 条件父块
     } else if (code === 22010 || code === 23310) {
       const sc = topScope('if');
       if (sc && !sc.hadElse) {
@@ -365,7 +371,7 @@ function analyzeUnit(u: ExecUnit, ctx: BuildCtx): StoryBlock[] {
   for (let i = 0; i < blocks.length; i++) {
     const b = blocks[i];
     if (suppressed.has(b)) { if (b === last && b.succ.length === 0) b.succ.push({ kind: 'return' }); continue; }
-    if (caseParents.has(b)) continue;  // case parent 已 branch 到所有选项，无线性继续
+    if (caseParents.has(b) || ifParents.has(b)) continue;  // case/if 条件父块已显式 branch 到各分支，无线性继续
     const hasOut = b.succ.some(s => s.kind !== 'next' && s.kind !== 'join' && s.kind !== 'loop' && s.kind !== 'branch' && s.kind !== 'return');
     if (hasOut) continue;
     if (i + 1 < blocks.length) b.succ.push({ kind: 'next', to: blocks[i + 1].id });
