@@ -3,9 +3,10 @@ dist/
 *.tsbuildinfo
 .DS_Store
 
-docs/
+.references
 
 *.log
 story-*.json
 
 _*
+.opencode
