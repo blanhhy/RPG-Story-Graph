@@ -14,6 +14,14 @@ const RECALL = 10830;          // 运行时行为，不作切分、不产生静�
 const CONTROL_SWITCHES = 10210; // 开关操作：设置开关 ON/OFF（用于识别"事件页切换"激活）
 const MESSAGE = new Set([10110, 20110, 10140, 20140]); // 显示有效承载
 
+/** 命令是否承载"非空"剧情文本。空消息（10110 但 string 为空）不算——
+ *  否则会产生 hasText=true 但 text="" 的空节点，被当作"只含空节点的图"保留。 */
+const isTextCmd = (c: EventCommand): boolean => {
+  if (!MESSAGE.has(c.code)) return false;
+  if (c.code === 10140) return true; // 显示选项：本身承载"【选择】"语义，与 string 无关
+  return (c.string ?? '').trim() !== '';
+};
+
 // 块 = 连续执行的"非流程"命令（其中可含对话）。流程命令做切分点。
 const FLOW = new Set([
   12010, 13310, // IF (普通/战斗)
@@ -148,7 +156,7 @@ export function computeTextReachable(units: ExecUnit[]): Map<string, boolean> {
   // 自身是否含文本
   const ownText = new Map<string, boolean>();
   for (const u of units) {
-    ownText.set(u.key, u.cmds.some(c => MESSAGE.has(c.code)));
+    ownText.set(u.key, u.cmds.some(isTextCmd));
   }
   // 出边：该单元调用哪些单元
   const outs = new Map<string, string[]>();
@@ -245,7 +253,7 @@ function analyzeUnit(u: ExecUnit, ctx: BuildCtx): StoryBlock[] {
   const append = (c: EventCommand, i: number) => {
     if (!cur) cur = newBlock('code');
     cur.range = cur.range ? [cur.range[0], i] : [i, i];
-    if (MESSAGE.has(c.code)) cur.hasText = true;
+    if (isTextCmd(c)) cur.hasText = true;
   };
   const topScope = (k?: Scope['kind']) => scopes[scopes.length - 1] && (!k || scopes[scopes.length - 1].kind === k) ? scopes[scopes.length - 1] : null;
   const lastBlock = () => blocks[blocks.length - 1] ?? null;
@@ -406,8 +414,12 @@ function analyzeUnit(u: ExecUnit, ctx: BuildCtx): StoryBlock[] {
       g.from.succ.push({ kind: 'goto', to: target ?? `Label#${g.id ?? '(无id)'}` });
     }
   }
-  // 剧情文本：按区间一次性提取（节点只保留位置 + 文本，不驻留命令）
-  for (const b of blocks) b.text = extractDialogue(cmds, b.range);
+  // 剧情文本：按区间一次性提取（节点只保留位置 + 文本，不驻留命令）。
+  // hasText 以提取出的非空文本为准，避免空消息命令（10110 空 string）被误判为含文本。
+  for (const b of blocks) {
+    b.text = extractDialogue(cmds, b.range);
+    b.hasText = b.text !== '';
+  }
   return blocks;
 }
 
@@ -433,7 +445,7 @@ export function buildStoryGraphs(units: ExecUnit[], ctx: BuildCtx): { graphs: St
       if (!m) continue;
       if (u.trigger !== 3 && u.trigger !== 4) continue;
       const mid = +m[1];
-      if (u.cmds.some(c => MESSAGE.has(c.code))) mapStory.set(mid, true);
+      if (u.cmds.some(isTextCmd)) mapStory.set(mid, true);
       for (const c of u.cmds) {
         if (c.code !== TELEPORT) continue;
         const tId = c.parameters?.[0] as number;

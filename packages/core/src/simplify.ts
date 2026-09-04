@@ -94,122 +94,18 @@ export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
     return ins.length * outs.length <= 400;
   };
 
-  // 分支枢纽：出边含 ≥2 条分支的空节点，若按 ins×outs 做笛卡尔积短路，会把一条
-  // 线性条件链炸成 O(n²) 的完全扇出（一个文本节点连到后面所有文本节点）。保留为
-  // 占位枢纽，维持"条件检查点"的语义与线性结构。两种情况需要保留：
-  //  1) 多入多出（如"连续 IF"里，上一个 IF 的汇合点又兼作下一个 IF 的条件父节点）；
-  //  2) 有 call 入边（子图入口即分支，如公共事件一进来就 IF——否则调用会被拆成
-  //     对每个分支的重复 call，破坏"单一入口"语义）。
-  const isBranchHub = (outs: MinEdge[], ins: MinEdge[]): boolean =>
-    outs.filter(e => e.kind === 'branch').length >= 2 &&
-    (ins.length >= 2 || ins.some(e => e.kind === 'call'));
+  // call 入口保护：子图入口即分支（公共事件一进来就 IF），若折叠会把一次调用
+  // 拆成对每个分支的重复 call，破坏"单一入口"语义。这类保留为入口占位。
+  // 其余空节点（含连续 IF 的 join 汇合点）一律折叠——降节点数优先于降边数，
+  // 在短路处用正确的折叠规则避免连续 IF 展开成完全图。
+  const isCallEntry = (ins: MinEdge[]): boolean =>
+    ins.some(e => e.kind === 'call');
 
   // 不动点精简：反复扫描并短路所有"安全"的空节点（无文本 + 扇出受限），
   // 直到无节点可删。每轮基于当前 in/out 度重新判定，避免一次性队列里
   // 因邻居合并导致度变化让某些节点被永久跳过（残留空节点）——被本轮
   // 跳过的节点会在下一轮重新判定，最终收敛到「能删的全删、超限的当枢纽保留」。
   const removed = new Set<string>();
-
-  // ===== 整体短路：纯空连通分量 =====
-  // 用户观察到的"龙须糖"式空子图：内部空节点互相连接极其复杂，但整体只通过
-  // 少数几条边界边与外部（文本节点或简单空节点）相连。逐节点折叠会因内部多入多出
-  // （isBranchHub）或 ins×outs 超限而卡住——但这类结构整体上等价于一条线（或一个小
-  // 枢纽），根本不需要理解内部，直接把「入边界 × 出边界」直连即可。
-  // 这里把每个"纯空连通分量"（仅由空节点及空→空边构成）当作一个超级节点整体坍缩。
-  const collapseEmptyComponents = (): boolean => {
-    const emptyIds = new Set<string>();
-    for (const [id, n] of nodes) if (!n.hasText) emptyIds.add(id);
-    // 空→空邻接（只走空节点之间的边）
-    const adj = new Map<string, string[]>();
-    for (const id of emptyIds) adj.set(id, []);
-    for (const e of edges) {
-      if (dead.has(e)) continue;
-      if (emptyIds.has(e.from) && emptyIds.has(e.to)) {
-        adj.get(e.from)!.push(e.to);
-        adj.get(e.to)!.push(e.from);
-      }
-    }
-    const visited = new Set<string>();
-    let changed = false;
-    for (const id of emptyIds) {
-      if (visited.has(id)) continue;
-      // 收集一个纯空连通分量
-      const comp = new Set<string>();
-      const q = [id];
-      visited.add(id);
-      while (q.length) {
-        const cur = q.pop()!;
-        comp.add(cur);
-        for (const nb of adj.get(cur) ?? []) {
-          if (!visited.has(nb)) { visited.add(nb); q.push(nb); }
-        }
-      }
-      // 边界：入边界 = 外部 → 分量内（按来源去重）；出边界 = 分量内 → 外部（按目标去重）
-      const inB: MinEdge[] = [];
-      const outB: MinEdge[] = [];
-      const seenIn = new Set<string>();
-      const seenOut = new Set<string>();
-      for (const cid of comp) {
-        for (const e of inIdx.get(cid) ?? []) {
-          if (dead.has(e)) continue;
-          if (comp.has(e.from)) continue;
-          if (seenIn.has(e.from)) continue;
-          seenIn.add(e.from);
-          inB.push(e);
-        }
-        for (const e of outIdx.get(cid) ?? []) {
-          if (dead.has(e)) continue;
-          if (comp.has(e.to)) continue;
-          if (seenOut.has(e.to)) continue;
-          seenOut.add(e.to);
-          outB.push(e);
-        }
-      }
-      // call 入口保留：展开 call 会把"一次调用"拆成对每个分支的重复调用，
-      // 破坏子图单一入口语义；这类留给逐节点折叠的 isBranchHub 兜底。
-      if (inB.some(e => e.kind === 'call')) continue;
-      // 入口/出口/孤立分量：直接删除，出边（或入边）随之悬空，图自然裂开。
-      if (inB.length === 0 || outB.length === 0) {
-        for (const cid of comp) {
-          removed.add(cid);
-          nodes.delete(cid);
-          for (const e of outIdx.get(cid) ?? []) dead.add(e);
-          for (const e of inIdx.get(cid) ?? []) dead.add(e);
-        }
-        changed = true;
-        continue;
-      }
-      // 边界入×出可控才整体坍缩；真正的大扇出（几十入×几十出）保留为枢纽。
-      if (inB.length * outB.length > 400) continue;
-      for (const cid of comp) {
-        removed.add(cid);
-        nodes.delete(cid);
-        for (const e of outIdx.get(cid) ?? []) dead.add(e);
-        for (const e of inIdx.get(cid) ?? []) dead.add(e);
-      }
-      for (const ie of inB) {
-        for (const oe of outB) {
-          if (oe.to === ie.from) continue; // 自环
-          let kind: EdgeKind;
-          let note: string | undefined;
-          if (ie.kind === 'call') { kind = 'call'; note = oe.note ?? ie.note; }
-          else if (oe.kind === 'return') { kind = 'return'; note = ie.note ?? oe.note; }
-          else {
-            const useOut = !TRANSPARENT.has(oe.kind);
-            kind = useOut ? oe.kind : ie.kind;
-            note = useOut ? (oe.note ?? ie.note) : (ie.note ?? oe.note);
-          }
-          const ne: MinEdge = { from: ie.from, to: oe.to, kind, note, ret: ie.ret ?? oe.ret };
-          edges.push(ne);
-          pushIdx(outIdx, ne.from, ne);
-          pushIdx(inIdx, ne.to, ne);
-        }
-      }
-      changed = true;
-    }
-    return changed;
-  };
-  while (collapseEmptyComponents()) { /* 不动点：整体短路后可能产生新的纯空分量 */ }
 
   let progress = true;
   while (progress) {
@@ -221,7 +117,7 @@ export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
       if (!isRemovable(n)) continue;
       const outs = liveOut(id);
       const ins = liveIn(id);
-      if (isBranchHub(outs, ins)) continue; // 保留分支枢纽，避免条件链扇出
+      if (isCallEntry(ins)) continue; // 保留 call 入口（子图单一入口语义）
       if (!outFanOutOk(id, n.role, outs)) continue;
       candidates.push({ id, score: ins.length * outs.length });
     }
@@ -242,7 +138,7 @@ export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
         continue;
       }
       // 复检：度可能在本轮前面节点的短路中变化，此刻仍超限则延后到下一轮。
-      if (isBranchHub(outs, ins)) continue; // 邻接变化后成为分支枢纽，延后
+      if (isCallEntry(ins)) continue; // 邻接变化后成为 call 入口，延后
       if (!outFanOutOk(id, n.role, outs)) continue;
 
       removed.add(id);
@@ -254,8 +150,18 @@ export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
       for (const e of inIdx.get(id) ?? []) dead.add(e);
 
       // 短路：每个入边 × 每个出边
+      // 连续 IF 无 else（switch-case）：join 节点同时有"条件真出边"（下一分支）和
+      // "条件假出边"（跳过到下一检查）。"汇合入边"（真分支文本显示后）不应再连
+      // "条件真出边"（命中后续互斥条件），否则互斥分支被展开成完全图；它只沿
+      // "条件假出边"继续。
+      const hasTrueOut = outs.some(e => e.kind === 'branch' && e.note === '条件真');
+      const hasFalseOut = outs.some(e => e.kind === 'branch' && e.note === '条件假');
+      const isIfChainJoin = hasTrueOut && hasFalseOut;
       for (const ie of ins) {
-        for (const oe of outs) {
+        const targetOuts = (isIfChainJoin && ie.kind === 'join')
+          ? outs.filter(oe => !(oe.kind === 'branch' && oe.note === '条件真'))
+          : outs;
+        for (const oe of targetOuts) {
           if (oe.to === ie.from) continue; // 自环
           // call / return 是"跨子图"边界，不能被中间空节点的分支类别覆盖：
           // call 入边应保持 call（否则调用被误写成条件分支），return 出边应保持 return。
@@ -264,7 +170,10 @@ export function simplifyGraph(raw: StoryGraph): StoryGraph | null {
           if (ie.kind === 'call') { kind = 'call'; note = oe.note ?? ie.note; }
           else if (oe.kind === 'return') { kind = 'return'; note = ie.note ?? oe.note; }
           else {
-            const useOut = !TRANSPARENT.has(oe.kind);
+            // join 汇合入边沿"条件假出边"继续时保持 join（顺序继续），
+            // 避免误标成 branch 假导致后续折叠把文本误当成分支链节点。
+            const preserveJoin = ie.kind === 'join' && oe.kind === 'branch' && oe.note === '条件假';
+            const useOut = !TRANSPARENT.has(oe.kind) && !preserveJoin;
             kind = useOut ? oe.kind : ie.kind;
             note = useOut ? (oe.note ?? ie.note) : (ie.note ?? oe.note);
           }
